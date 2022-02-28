@@ -1,0 +1,136 @@
+require('arsenal')
+require('tidyverse')
+require('janitor')
+# require('haven')  #if importing sas7bdat instead of csv
+
+# Comparison ===================================================================
+# function to get data at a set file path and return as large list
+fDataAsList <- function(.path) {
+  
+  .fileNames <- file.path(
+    .path,
+    list.files(
+      path = .path,
+      recursive = T,
+      pattern = '*.csv' #note: all our data are in CSV.  The haven package will need to be used for .sas7bdat files.
+    ))
+  
+  x <- .fileNames %>%
+    map(~ janitor::clean_names(
+      read_csv(
+        .,
+        col_names = F,
+        show_col_types = F,
+        na = ''
+      ),
+      parsing_option = -1,
+      use_make_names = F,
+      case = 'all_caps'
+    ) %>%
+    `names<-`(.,gsub('(.csv)|(\\s)|([[:punct:]])',
+                     '',
+                     toupper(basename(.fileNames)),
+                     ignore.case = T)
+              )
+  return(x)
+}
+
+
+## Set comparison keys/groups --------------------------------------------------
+compareKeys <- list(
+  'AE' = list('subject_number', 'visit_date', 'ae_description'),
+  'CONMED' = list('subject_number', 'visit_date'),
+  'CONSENT' = list('subject_number', 'visit_date'),
+  'CRISLABFORM' = list('subject_number', 'visit_date'),
+  'CSF' = list('subject_number', 'visit_date'),
+  'DEVHX' = list('subject_number', 'visit_date'),
+  'ECG' = list('study id', 'result date', 'EKG observation'),
+  'ECHO' = list('subject_number', 'visit_date'),
+  'ELIGNULL' = list('subject_number'),
+  'ELIGIBILITYFORM' = list('subject_number'),
+  'EOS' = list('subject_number'),
+  'FARS' = list('subject_number', 'visit_date'),
+  'FPE' = list('subject_number', 'visit_date'),
+  'GANGT' = list('subject_number', 'visit_date'),
+  'GANPT' = list('subject_number', 'interval_name', 'visit_date'),
+  'INTAKEMHX' = list('subject_number', 'visit_date'),
+  'INTERIMMHX' = list('subject_number', 'visit_date'),
+  'LAB' = list('study id', 'collected date time', 'order name', 'cluster name', 'observation name', 'reported date time'),
+  'MEDREVIEW' = list('subject_number', 'visit_date'),
+  'MUS' = list('subject_number', 'visit_date'),
+  'NCS' = list('subject_number', 'visit_date'),
+  'NERVEBIOPSY' = list('subject_number', 'visit_date'),
+  'NIS' = list('subject_number', 'visit_date'),
+  'OPHTH' = list('subject_number', 'visit_date'),
+  'PFT' = list('subject_number', 'visit_date'),
+  'PREG' = list('subject_number', 'visit_date'),
+  'PROGRESSNOTE' = list('subject_number', 'visit_date'),
+  'RASCHDISABILITY' = list('subject_number', 'visit_date'),
+  'SPE' = list('subject_number', 'visit_date'),
+  'VECTORADMIN' = list('subject_number', 'visit_date'),
+  'VITALSIGNS' = list('subject_number', 'visit_date')
+) %>% modify_depth(2,toupper)
+
+### Keys that are date-time fields ---------------------------------------------
+EDC_date_fields <- rbindlist(GAN_CRF_specs, fill = T) %>%
+  #filter(!is.na(Validation)) %>% modify_at('Validation', as.factor)
+  filter(str_detect(Validation,'Date') | 
+           (str_detect(`Question Name`,'DATE') & is.na(Answer))
+  ) %>%
+  pull(`Question Name`) %>% unique()
+
+compareKeys_dates <- unique(grep("DATE",
+                                 unname(unlist(compareKeys)),
+                                 value = T)
+                            )
+
+date_fields <- unique(base::union(EDC_date_fields,compareKeys_dates))
+
+## Current Data ----------------------------------------------------------------
+current_data <- fDataAsList(current_data_path) %>%
+  imodify(.,  ~ mutate(., across(
+    any_of(date_fields),
+    ~ as.character(parse_date_time(.x, orders = c('mdy_HMS','mdy_HM', 'mdy')))
+  )))
+
+
+## Previous Data ---------------------------------------------------------------
+previous_data <- fDataAsList(previous_data_path) %>%
+  imodify(.,  ~ mutate(., across(
+    any_of(date_fields),
+    ~ as.character(parse_date_time(.x, orders = c('mdy_HMS','mdy_HM', 'mdy')))
+  )))
+
+
+## Compare current (x) to previous (y) -----------------------------------------
+data_compare <- pmap(
+  list(x = current_data, #
+       y = previous_data, # 
+       compareKeys),
+  ~ diffs(arsenal::comparedf(x = ..1,
+                             y = ..2,
+                             by = unlist(..3)
+  )
+  ) %>%
+    unnest_longer(values.x) %>%
+    unnest_longer(values.y) %>%
+    `names<-`(., gsub('\\.x','_current', names(.))) %>%
+    `names<-`(., gsub('\\.y','_prior', names(.)))
+  )
+
+## Output to xlsx --------------------------------------------------------------
+{
+  wb <- openxlsx::createWorkbook()
+  
+  iwalk(
+    names(data_compare),
+    ~ openxlsx::writeData(wb,
+                          openxlsx::addWorksheet(wb,
+                                                 .,
+                                                 zoom = 85),
+                          data_compare[[.]])
+  )
+}
+openxlsx::saveWorkbook(wb,
+                       'Output/proc_compare_test.xlsx',
+                       overwrite = T)
